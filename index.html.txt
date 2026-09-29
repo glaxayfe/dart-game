@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>스와이프 다트 챔피언십</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #1a1a2e; overflow: hidden; font-family: 'Pretendard', sans-serif; touch-action: none; }
+        #gameCanvas { display: block; width: 100%; height: 100%; }
+        
+        .ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .hud { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; color: white; font-size: 24px; font-weight: bold; pointer-events: auto; }
+        
+        .panel { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); padding: 30px; border-radius: 15px; text-align: center; color: white; box-shadow: 0 10px 30px rgba(0,0,0,0.5); pointer-events: auto; display: none; width: 80%; max-width: 350px; }
+        .panel h1 { margin-top: 0; color: #ffeb3b; }
+        button { background: #e94560; color: white; border: none; padding: 12px 24px; font-size: 18px; border-radius: 8px; cursor: pointer; font-weight: bold; margin-top: 15px; width: 100%; }
+        button:active { transform: scale(0.95); }
+        input { width: 90%; padding: 10px; margin: 10px 0; border-radius: 5px; border: none; font-size: 16px; text-align: center; }
+        
+        .leaderboard-list { list-style: none; padding: 0; margin: 15px 0; text-align: left; max-height: 200px; overflow-y: auto; }
+        .leaderboard-list li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.2); font-size: 18px; }
+        
+        #startPanel { display: block; }
+        #message { position: absolute; top: 30%; color: #fff; font-size: 40px; font-weight: bold; opacity: 0; transition: opacity 0.5s; text-shadow: 2px 2px 5px #000; }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div class="ui-layer">
+        <div class="hud" id="hud" style="display:none;">
+            <div>점수: <span id="scoreDisplay">0</span></div>
+            <div>남은 다트: <span id="dartsLeft">5</span></div>
+        </div>
+
+        <div id="message">명중!</div>
+
+        <!-- 시작 패널 -->
+        <div class="panel" id="startPanel">
+            <h1>다트 챔피언십 🎯</h1>
+            <p>다트를 누른 상태로 <b>위로 드래그(스와이프)</b>해서 던지세요!<br>방향과 길이에 따라 날아갑니다.</p>
+            <button onclick="startGame()">게임 시작</button>
+            <button onclick="showLeaderboard()" style="background: #0f3460;">실시간 랭킹 보기</button>
+        </div>
+
+        <!-- 게임 오버 및 이름 입력 패널 -->
+        <div class="panel" id="gameOverPanel">
+            <h1>게임 종료!</h1>
+            <p style="font-size: 24px;">최종 점수: <b id="finalScore" style="color: #ffeb3b;">0</b>점</p>
+            <input type="text" id="playerName" placeholder="당신의 닉네임을 입력하세요" maxlength="10">
+            <button onclick="submitScore()" id="submitBtn">랭킹 등록하기</button>
+            <button onclick="location.reload()" style="background: #555;">다시 하기</button>
+        </div>
+
+        <!-- 리더보드 패널 -->
+        <div class="panel" id="leaderboardPanel">
+            <h1>🏆 실시간 명예의 전당</h1>
+            <ul class="leaderboard-list" id="leaderboardList">
+                <li>로딩 중...</li>
+            </ul>
+            <button onclick="closeLeaderboard()">닫기</button>
+        </div>
+    </div>
+
+<script>
+    // --- 실시간 랭킹 공유용 DB API 설정 (무료 공용 KVDB) ---
+    const DB_URL = "https://kvdb.io/2UcwGvTjYwXG38w8YkU2d3/dart_ranking";
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    let score = 0, darts = 5, isPlaying = false;
+    let dartsThrown = [];
+    let currentDart = null;
+    let boardX = canvas.width / 2, boardY = canvas.height * 0.35, boardRadius = Math.min(canvas.width, canvas.height) * 0.35;
+
+    // 드래그(스와이프) 변수
+    let isDragging = false;
+    let dragStartX = 0, dragStartY = 0;
+    let currentX = 0, currentY = 0;
+
+    class Dart {
+        constructor() {
+            this.x = canvas.width / 2;
+            this.y = canvas.height * 0.85;
+            this.targetX = this.x;
+            this.targetY = this.y;
+            this.scale = 1;
+            this.isFlying = false;
+            this.landed = false;
+        }
+        flyTo(tx, ty) {
+            this.targetX = tx;
+            this.targetY = ty;
+            this.isFlying = true;
+        }
+        update() {
+            if (this.isFlying) {
+                this.x += (this.targetX - this.x) * 0.1;
+                this.y += (this.targetY - this.y) * 0.1;
+                this.scale -= 0.03; // 멀어지는 효과 (작아짐)
+                
+                if (this.scale <= 0.3) {
+                    this.scale = 0.3;
+                    this.isFlying = false;
+                    this.landed = true;
+                    calculateScore(this.x, this.y);
+                    setTimeout(nextDart, 1000);
+                }
+            }
+        }
+        draw() {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.scale(this.scale, this.scale);
+            
+            // 다트 그리기
+            ctx.fillStyle = "#fff";
+            ctx.beginPath();
+            ctx.moveTo(0, -30);
+            ctx.lineTo(10, 10);
+            ctx.lineTo(-10, 10);
+            ctx.fill();
+            
+            ctx.fillStyle = "#e94560";
+            ctx.beginPath();
+            ctx.moveTo(0, 10);
+            ctx.lineTo(5, 40);
+            ctx.lineTo(-5, 40);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    function drawBoard() {
+        const colors = ["#000", "#eee", "#e94560", "#0f3460", "#ffeb3b"];
+        const rings = [1, 0.8, 0.6, 0.4, 0.15];
+        rings.forEach((r, i) => {
+            ctx.beginPath();
+            ctx.arc(boardX, boardY, boardRadius * r, 0, Math.PI * 2);
+            ctx.fillStyle = colors[i];
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "#fff";
+            ctx.stroke();
+        });
+    }
+
+    function calculateScore(x, y) {
+        let dx = x - boardX;
+        let dy = y - boardY;
+        let dist = Math.sqrt(dx * dx + dy * dy);
+        let points = 0;
+
+        if (dist < boardRadius * 0.15) points = 50;
+        else if (dist < boardRadius * 0.4) points = 30;
+        else if (dist < boardRadius * 0.6) points = 20;
+        else if (dist < boardRadius * 0.8) points = 10;
+        else if (dist < boardRadius) points = 5;
+
+        score += points;
+        document.getElementById('scoreDisplay').innerText = score;
+        
+        let msg = document.getElementById('message');
+        msg.innerText = points > 0 ? `+${points}점!` : "Miss!";
+        msg.style.opacity = 1;
+        setTimeout(() => msg.style.opacity = 0, 1000);
+    }
+
+    function nextDart() {
+        if (darts > 1) {
+            darts--;
+            document.getElementById('dartsLeft').innerText = darts;
+            dartsThrown.push(currentDart);
+            currentDart = new Dart();
+        } else {
+            isPlaying = false;
+            document.getElementById('gameOverPanel').style.display = 'block';
+            document.getElementById('finalScore').innerText = score;
+        }
+    }
+
+    function gameLoop() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawBoard();
+        
+        dartsThrown.forEach(d => d.draw());
+
+        if (currentDart) {
+            currentDart.update();
+            currentDart.draw();
+        }
+
+        // 드래그 중일 때 궤적 선 그리기
+        if (isDragging && !currentDart.isFlying && !currentDart.landed) {
+            ctx.beginPath();
+            ctx.moveTo(currentDart.x, currentDart.y);
+            ctx.lineTo(currentDart.x + (currentX - dragStartX) * -2, currentDart.y + (currentY - dragStartY) * -2);
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([5, 5]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    // 입력 처리 (마우스 & 터치)
+    function startDrag(e) {
+        if (!isPlaying || currentDart.isFlying || currentDart.landed) return;
+        isDragging = true;
+        let clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        let clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        dragStartX = clientX;
+        dragStartY = clientY;
+        currentX = clientX;
+        currentY = clientY;
+    }
+
+    function doDrag(e) {
+        if (!isDragging) return;
+        currentX = e.touches ? e.touches[0].clientX : e.clientX;
+        currentY = e.touches ? e.touches[0].clientY : e.clientY;
+    }
+
+    function endDrag(e) {
+        if (!isDragging) return;
+        isDragging = false;
+        
+        // 드래그 벡터 계산 (반대 방향으로 날아감 - 당겨서 쏘는 새총 느낌 or 밀어서 던지기)
+        // 위로 스와이프하면 그 방향으로 날아가도록 설정
+        let dx = currentX - dragStartX;
+        let dy = currentY - dragStartY;
+        
+        // 너무 짧은 드래그는 무시
+        if (Math.abs(dy) < 10) return;
+
+        // 드래그 한 거리의 3배만큼 다트가 이동함 (스와이프 감도 조절)
+        let targetX = currentDart.x + dx * 2.5;
+        let targetY = currentDart.y + dy * 2.5;
+
+        currentDart.flyTo(targetX, targetY);
+    }
+
+    window.addEventListener('mousedown', startDrag);
+    window.addEventListener('mousemove', doDrag);
+    window.addEventListener('mouseup', endDrag);
+    window.addEventListener('touchstart', startDrag);
+    window.addEventListener('touchmove', doDrag);
+    window.addEventListener('touchend', endDrag);
+
+    function startGame() {
+        document.getElementById('startPanel').style.display = 'none';
+        document.getElementById('hud').style.display = 'flex';
+        score = 0; darts = 5; dartsThrown = [];
+        document.getElementById('scoreDisplay').innerText = score;
+        document.getElementById('dartsLeft').innerText = darts;
+        currentDart = new Dart();
+        isPlaying = true;
+    }
+
+    // --- 데이터베이스(랭킹) 로직 ---
+    async function showLeaderboard() {
+        document.getElementById('startPanel').style.display = 'none';
+        document.getElementById('leaderboardPanel').style.display = 'block';
+        const list = document.getElementById('leaderboardList');
+        list.innerHTML = "<li>불러오는 중...⏳</li>";
+        
+        try {
+            let res = await fetch(DB_URL);
+            let data = res.ok ? await res.json() : [];
+            if (!Array.isArray(data)) data = [];
+            
+            list.innerHTML = "";
+            if (data.length === 0) list.innerHTML = "<li>아직 등록된 랭킹이 없습니다.</li>";
+            
+            data.sort((a, b) => b.score - a.score).slice(0, 10).forEach((entry, idx) => {
+                list.innerHTML += `<li><span>${idx + 1}. ${entry.name}</span> <span>${entry.score}점</span></li>`;
+            });
+        } catch(e) {
+            list.innerHTML = "<li>랭킹을 불러올 수 없습니다.</li>";
+        }
+    }
+
+    function closeLeaderboard() {
+        document.getElementById('leaderboardPanel').style.display = 'none';
+        document.getElementById('startPanel').style.display = 'block';
+    }
+
+    async function submitScore() {
+        const name = document.getElementById('playerName').value.trim() || "익명";
+        const btn = document.getElementById('submitBtn');
+        btn.innerText = "등록 중...";
+        btn.disabled = true;
+
+        try {
+            let res = await fetch(DB_URL);
+            let data = res.ok ? await res.json() : [];
+            if (!Array.isArray(data)) data = [];
+
+            data.push({ name: name, score: score });
+            data.sort((a, b) => b.score - a.score);
+            data = data.slice(0, 10); // 상위 10명만 저장
+
+            await fetch(DB_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            document.getElementById('gameOverPanel').style.display = 'none';
+            showLeaderboard();
+        } catch(e) {
+            alert("랭킹 등록 실패! 인터넷 연결을 확인하세요.");
+            btn.innerText = "랭킹 등록하기";
+            btn.disabled = false;
+        }
+    }
+
+    gameLoop();
+</script>
+</body>
+</html>
